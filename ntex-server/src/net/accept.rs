@@ -142,6 +142,7 @@ impl fmt::Debug for AcceptLoop {
 }
 
 struct Accept {
+    name: String,
     poller: Arc<Poller>,
     rx: mpsc::Receiver<AcceptorCommand>,
     tx: Option<oneshot::Sender<()>>,
@@ -168,12 +169,24 @@ impl Accept {
         status_handler: Option<Box<dyn FnMut(ServerStatus) + Send>>,
     ) {
         log::info!("Starting {name:?} accept loop");
+        let accept_name = name.clone();
 
         // start accept thread
         let sys = System::current();
         let _ = thread::Builder::new().name(name).spawn(move || {
             System::set_current(sys);
-            Accept::new(tx, rx, poller, socks, srv, notify, testing, status_handler).poll();
+            Accept::new(
+                tx,
+                rx,
+                poller,
+                socks,
+                srv,
+                accept_name,
+                notify,
+                testing,
+                status_handler,
+            )
+            .poll();
         });
     }
 
@@ -184,6 +197,7 @@ impl Accept {
         poller: Arc<Poller>,
         socks: Vec<(Token, Listener)>,
         srv: Server,
+        name: String,
         notify: AcceptNotify,
         testing: bool,
         status_handler: Option<Box<dyn FnMut(ServerStatus) + Send>>,
@@ -200,6 +214,7 @@ impl Accept {
         }
 
         Accept {
+            name,
             poller,
             rx,
             sockets,
@@ -341,25 +356,35 @@ impl Accept {
                 Ok(cmd) => match cmd {
                     AcceptorCommand::Stop(rx) => {
                         if !self.backpressure {
-                            log::info!("Stopping accept loop");
+                            log::info!("Stopping {:?} accept loop", self.name);
                             self.backpressure(true);
                         }
                         break Either::Right(Some(rx));
                     }
                     AcceptorCommand::Terminate => {
-                        log::info!("Stopping accept loop");
+                        log::info!("Stopping {:?} accept loop", self.name);
                         self.backpressure(true);
                         break Either::Right(None);
                     }
                     AcceptorCommand::Pause => {
+                        log::trace!(
+                            "Accept loop {:?} received Pause, backpressure={}",
+                            self.name,
+                            self.backpressure
+                        );
                         if !self.backpressure {
-                            log::info!("Pausing accept loop");
+                            log::info!("Pausing {:?} accept loop", self.name);
                             self.backpressure(true);
                         }
                     }
                     AcceptorCommand::Resume => {
+                        log::trace!(
+                            "Accept loop {:?} received Resume, backpressure={}",
+                            self.name,
+                            self.backpressure
+                        );
                         if self.backpressure {
-                            log::info!("Resuming accept loop");
+                            log::info!("Resuming {:?} accept loop", self.name);
                             self.backpressure(false);
                         }
                     }
@@ -382,6 +407,15 @@ impl Accept {
     }
 
     fn backpressure(&mut self, on: bool) {
+        log::trace!(
+            "Accept loop {:?} updating status to {:?}",
+            self.name,
+            if on {
+                ServerStatus::NotReady
+            } else {
+                ServerStatus::Ready
+            }
+        );
         self.update_status(if on {
             ServerStatus::NotReady
         } else {
