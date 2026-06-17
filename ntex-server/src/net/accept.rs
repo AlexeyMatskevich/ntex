@@ -248,6 +248,11 @@ impl Accept {
         }
 
         loop {
+            if let Either::Right(rx) = self.process_cmd() {
+                self.stop_loop(rx);
+                break;
+            }
+
             events.clear();
 
             if let Err(e) = self.poller.wait(&mut events, None) {
@@ -267,24 +272,26 @@ impl Accept {
             }
 
             match self.process_cmd() {
-                Either::Left(()) => events.clear(),
+                Either::Left(()) => (),
                 Either::Right(rx) => {
-                    // cleanup
-                    for info in self.sockets.drain(..) {
-                        info.sock.remove_source();
-                    }
-                    log::info!("Accept loop has been stopped");
-
-                    if let Some(rx) = rx {
-                        if !self.testing {
-                            thread::sleep(EXIT_TIMEOUT);
-                        }
-                        let _ = rx.send(());
-                    }
-
+                    self.stop_loop(rx);
                     break;
                 }
             }
+        }
+    }
+
+    fn stop_loop(&mut self, rx: Option<oneshot::Sender<()>>) {
+        for info in self.sockets.drain(..) {
+            info.sock.remove_source();
+        }
+        log::info!("Accept loop {:?} has been stopped", self.name);
+
+        if let Some(rx) = rx {
+            if !self.testing {
+                thread::sleep(EXIT_TIMEOUT);
+            }
+            let _ = rx.send(());
         }
     }
 
