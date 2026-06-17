@@ -8,7 +8,7 @@ use std::net::{self, TcpStream};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ntex::http::{HttpService, HttpServiceConfig};
 use ntex::io::IoConfig;
@@ -17,12 +17,24 @@ use ntex::web::{self, App, HttpResponse, WebAppConfig};
 use ntex::{SharedCfg, rt};
 
 async fn wait_for_ready(name: &'static str, rx: mpsc::Receiver<()>) {
-    let result = rt::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5))).await;
+    let timeout = std::env::var("READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|val| val.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(5));
+    let started = Instant::now();
+    let result = rt::spawn_blocking(move || rx.recv_timeout(timeout)).await;
 
     match result {
-        Ok(Ok(())) => eprintln!("{name}: observed ServerStatus::Ready"),
+        Ok(Ok(())) => eprintln!(
+            "{name}: observed ServerStatus::Ready after {:?}",
+            started.elapsed()
+        ),
         Ok(Err(err)) => {
-            panic!("{name}: timed out waiting for ServerStatus::Ready: {err:?}")
+            panic!(
+                "{name}: timed out after {:?} waiting for ServerStatus::Ready: {err:?}",
+                started.elapsed()
+            )
         }
         Err(err) => panic!("{name}: spawn_blocking failed while waiting for Ready: {err}"),
     }

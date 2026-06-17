@@ -18,6 +18,10 @@ on:
         description: std TcpStream after ServerStatus::Ready with ntex/tokio
         required: false
         default: "2000"
+      extended_ready_iterations:
+        description: extended 30s ready wait control iterations
+        required: false
+        default: "200"
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
       CLIENT_ITERS: ${{ github.event.inputs.client_iterations || '2000' }}
       STD_CONNECT_ITERS: ${{ github.event.inputs.std_connect_iterations || '2000' }}
       TOKIO_STD_CONNECT_ITERS: ${{ github.event.inputs.tokio_std_connect_iterations || '2000' }}
+      EXTENDED_READY_ITERS: ${{ github.event.inputs.extended_ready_iterations || '200' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -172,6 +177,74 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Stress ntex client after ServerStatus::Ready, 30s ready wait
+        id: client_ready_extended
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p ntex-ready-diagnostic-logs
+          for i in $(seq 1 "$EXTENDED_READY_ITERS"); do
+            log="ntex-ready-diagnostic-logs/client-ready-extended-${i}.log"
+            echo "::group::client ready extended iteration ${i}/${EXTENDED_READY_ITERS}"
+            set +e
+            timeout 180s env READY_TIMEOUT_SECS=30 RUST_LOG="$RUST_LOG_FILTER" \
+              cargo test -p ntex --test ready_barrier_client -- --nocapture \
+              >"$log" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              {
+                echo "name=client-ready-extended"
+                echo "iteration=${i}"
+                echo "status=${status}"
+                echo "command=READY_TIMEOUT_SECS=30 cargo test -p ntex --test ready_barrier_client -- --nocapture"
+                echo "rustc=$(rustc --version)"
+                echo "kernel=$(uname -a)"
+              } > ntex-ready-diagnostic-logs/failure-client-ready-extended.env
+              echo "::error::client ready extended failed on iteration ${i} with status ${status}"
+              tail -n 500 "$log"
+              echo "::endgroup::"
+              exit "$status"
+            fi
+            rm -f "$log"
+            echo "::endgroup::"
+          done
+
+      - name: Stress std TcpStream after ServerStatus::Ready, 30s ready wait
+        id: std_connect_extended
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p ntex-ready-diagnostic-logs
+          for i in $(seq 1 "$EXTENDED_READY_ITERS"); do
+            log="ntex-ready-diagnostic-logs/std-connect-extended-${i}.log"
+            echo "::group::std connect extended iteration ${i}/${EXTENDED_READY_ITERS}"
+            set +e
+            timeout 180s env READY_TIMEOUT_SECS=30 RUST_LOG="$RUST_LOG_FILTER" \
+              cargo test -p ntex --test ready_barrier_std_connect -- --nocapture \
+              >"$log" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              {
+                echo "name=std-connect-extended"
+                echo "iteration=${i}"
+                echo "status=${status}"
+                echo "command=READY_TIMEOUT_SECS=30 cargo test -p ntex --test ready_barrier_std_connect -- --nocapture"
+                echo "rustc=$(rustc --version)"
+                echo "kernel=$(uname -a)"
+              } > ntex-ready-diagnostic-logs/failure-std-connect-extended.env
+              echo "::error::std connect extended failed on iteration ${i} with status ${status}"
+              tail -n 500 "$log"
+              echo "::endgroup::"
+              exit "$status"
+            fi
+            rm -f "$log"
+            echo "::endgroup::"
+          done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -186,6 +259,10 @@ jobs:
           printf 'client ready outcome: %s\n' '${{ steps.client_ready.outcome }}'
           printf 'std connect outcome: %s\n' '${{ steps.std_connect.outcome }}'
           printf 'tokio std connect outcome: %s\n' '${{ steps.std_connect_tokio.outcome }}'
+          printf 'client ready extended outcome: %s\n' '${{ steps.client_ready_extended.outcome }}'
+          printf 'std connect extended outcome: %s\n' '${{ steps.std_connect_extended.outcome }}'
           test '${{ steps.client_ready.outcome }}' = success
           test '${{ steps.std_connect.outcome }}' = success
           test '${{ steps.std_connect_tokio.outcome }}' = success
+          test '${{ steps.client_ready_extended.outcome }}' = success
+          test '${{ steps.std_connect_extended.outcome }}' = success

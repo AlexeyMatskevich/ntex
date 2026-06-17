@@ -85,7 +85,7 @@ impl<T> Worker<T> {
     {
         let (tx1, rx1) = unbounded();
         let (tx2, rx2) = unbounded();
-        let (avail, avail_tx) = WorkerAvailability::create();
+        let (avail, avail_tx) = WorkerAvailability::create(&name);
         let name2 = name.clone();
 
         Arbiter::with_name(name.clone()).handle().spawn(async move {
@@ -152,11 +152,14 @@ impl<T> Worker<T> {
         if self.failed.load(Ordering::Acquire) {
             WorkerStatus::Failed
         } else {
+            log::trace!("Worker {:?} waiting for status update", self.name);
             self.avail.wait_for_update().await;
             if self.avail.failed() {
                 self.failed.store(true, Ordering::Release);
             }
-            self.status()
+            let status = self.status();
+            log::trace!("Worker {:?} observed status update: {status:?}", self.name);
+            status
         }
     }
 
@@ -205,6 +208,7 @@ struct WorkerAvailabilityTx {
 
 #[derive(Debug)]
 struct Inner {
+    name: String,
     waker: AtomicWaker,
     updated: AtomicBool,
     available: AtomicBool,
@@ -212,8 +216,9 @@ struct Inner {
 }
 
 impl WorkerAvailability {
-    fn create() -> (Self, WorkerAvailabilityTx) {
+    fn create(name: &str) -> (Self, WorkerAvailabilityTx) {
         let inner = Arc::new(Inner {
+            name: name.to_string(),
             waker: AtomicWaker::new(),
             updated: AtomicBool::new(false),
             available: AtomicBool::new(false),
@@ -237,15 +242,20 @@ impl WorkerAvailability {
 
     async fn wait_for_update(&self) {
         poll_fn(|cx| {
-            if self.inner.updated.swap(false, Ordering::AcqRel) {
+            if self.inner.updated.load(Ordering::Acquire) {
+                log::trace!(
+                    "Worker {:?} consuming pending availability update",
+                    self.inner.name
+                );
+                self.inner.updated.store(false, Ordering::Release);
                 Poll::Ready(())
             } else {
+                log::trace!(
+                    "Worker {:?} registering availability waker",
+                    self.inner.name
+                );
                 self.inner.waker.register(cx.waker());
-                if self.inner.updated.swap(false, Ordering::AcqRel) {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
+                Poll::Pending
             }
         })
         .await;
@@ -256,14 +266,21 @@ impl WorkerAvailabilityTx {
     fn set(&self, val: bool) {
         let old = self.inner.available.swap(val, Ordering::Release);
         if old != val {
+            log::trace!(
+                "Worker {:?} availability changed: {old} -> {val}",
+                self.inner.name
+            );
             self.inner.updated.store(true, Ordering::Release);
             self.inner.waker.wake();
+        } else {
+            log::trace!("Worker {:?} availability unchanged: {val}", self.inner.name);
         }
     }
 }
 
 impl Drop for WorkerAvailabilityTx {
     fn drop(&mut self) {
+        log::trace!("Worker {:?} availability tx dropped", self.inner.name);
         self.inner.failed.store(true, Ordering::Release);
         self.inner.updated.store(true, Ordering::Release);
         self.inner.available.store(false, Ordering::Release);

@@ -109,27 +109,55 @@ impl<F: ServerConfiguration> ServerManager<F> {
     }
 
     pub(crate) fn pause(&self) {
+        log::trace!("ServerManager {:?}: pause requested", self.0.cfg.name);
         self.0.shared.paused.store(true, Ordering::Release);
         self.0.factory.paused();
     }
 
     pub(crate) fn resume(&self) {
+        log::trace!("ServerManager {:?}: resume requested", self.0.cfg.name);
         self.0.shared.paused.store(false, Ordering::Release);
         self.0.factory.resumed();
     }
 
     fn available(&self, wrk: Worker<F::Item>) {
-        let _ = self
+        let name = wrk.name().to_string();
+        if self
             .0
             .cmd
-            .try_send(ServerCommand::Worker(Update::Available(wrk)));
+            .try_send(ServerCommand::Worker(Update::Available(wrk)))
+            .is_ok()
+        {
+            log::trace!(
+                "ServerManager {:?}: queued Available for {name:?}",
+                self.0.cfg.name
+            );
+        } else {
+            log::error!(
+                "ServerManager {:?}: failed to queue Available for {name:?}",
+                self.0.cfg.name
+            );
+        }
     }
 
     fn unavailable(&self, wrk: Worker<F::Item>) {
-        let _ = self
+        let name = wrk.name().to_string();
+        if self
             .0
             .cmd
-            .try_send(ServerCommand::Worker(Update::Unavailable(wrk)));
+            .try_send(ServerCommand::Worker(Update::Unavailable(wrk)))
+            .is_ok()
+        {
+            log::trace!(
+                "ServerManager {:?}: queued Unavailable for {name:?}",
+                self.0.cfg.name
+            );
+        } else {
+            log::error!(
+                "ServerManager {:?}: failed to queue Unavailable for {name:?}",
+                self.0.cfg.name
+            );
+        }
     }
 
     fn add_stop_notify(&self, tx: oneshot::Sender<()>) {
@@ -214,6 +242,12 @@ impl<F: ServerConfiguration> HandleCmdState<F> {
     fn update_workers(&mut self, upd: Update<F::Item>) {
         match upd {
             Update::Available(worker) => {
+                log::trace!(
+                    "ServerManager {:?}: handling Available for {:?}, workers before={}",
+                    self.mgr.0.cfg.name,
+                    worker.name(),
+                    self.workers.len()
+                );
                 self.workers.push(worker);
                 self.workers.sort();
                 if self.workers.len() == 1 {
@@ -221,6 +255,12 @@ impl<F: ServerConfiguration> HandleCmdState<F> {
                 }
             }
             Update::Unavailable(worker) => {
+                log::trace!(
+                    "ServerManager {:?}: handling Unavailable for {:?}, workers before={}",
+                    self.mgr.0.cfg.name,
+                    worker.name(),
+                    self.workers.len()
+                );
                 if let Ok(idx) = self.workers.binary_search(&worker) {
                     self.workers.remove(idx);
                 }

@@ -70,21 +70,25 @@ impl ServerConfiguration for StreamServer {
 
     /// Server is paused
     fn paused(&self) {
+        log::trace!("StreamServer sending Pause to accept loop");
         self.notify.send(AcceptorCommand::Pause);
     }
 
     /// Server is resumed
     fn resumed(&self) {
+        log::trace!("StreamServer sending Resume to accept loop");
         self.notify.send(AcceptorCommand::Resume);
     }
 
     /// Server is stopped
     fn terminate(&self) {
+        log::trace!("StreamServer sending Terminate to accept loop");
         self.notify.send(AcceptorCommand::Terminate);
     }
 
     /// Server is stopped
     async fn stop(&self) {
+        log::trace!("StreamServer sending Stop to accept loop");
         let (tx, rx) = oneshot::channel();
         self.notify.send(AcceptorCommand::Stop(tx));
         let _ = rx.await;
