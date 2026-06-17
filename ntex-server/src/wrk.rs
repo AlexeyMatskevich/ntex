@@ -242,12 +242,11 @@ impl WorkerAvailability {
 
     async fn wait_for_update(&self) {
         poll_fn(|cx| {
-            if self.inner.updated.load(Ordering::Acquire) {
+            if self.inner.updated.swap(false, Ordering::AcqRel) {
                 log::trace!(
-                    "Worker {:?} consuming pending availability update",
+                    "Worker {:?} consuming pending availability update before register",
                     self.inner.name
                 );
-                self.inner.updated.store(false, Ordering::Release);
                 Poll::Ready(())
             } else {
                 log::trace!(
@@ -255,7 +254,15 @@ impl WorkerAvailability {
                     self.inner.name
                 );
                 self.inner.waker.register(cx.waker());
-                Poll::Pending
+                if self.inner.updated.swap(false, Ordering::AcqRel) {
+                    log::trace!(
+                        "Worker {:?} consuming pending availability update after register",
+                        self.inner.name
+                    );
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
             }
         })
         .await;
