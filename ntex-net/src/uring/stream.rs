@@ -1,4 +1,4 @@
-use std::{cell::Cell, io, mem, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
+use std::{cell::Cell, io, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
 
 use ntex_bytes::{BufMut, BytePage, BytePages, BytesMut};
 use ntex_io::{IoContext, IoTaskStatus};
@@ -30,16 +30,15 @@ enum IdType {
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-    struct Flags: u16 {
-        const RD_CANCELING = 0b0000_0000_0001;
-        const RD_REISSUE   = 0b0000_0000_0010;
-        const RD_MORE      = 0b0000_0000_0100;
-        const WR_CANCELING = 0b0000_0000_1000;
-        const WR_REISSUE   = 0b0000_0001_0000;
-        const NO_ZC        = 0b0000_0010_0000;
-        const DROPPED_PRI  = 0b0000_0100_0000;
-        const DROPPED_SEC  = 0b0000_1000_0000;
-        const CLOSING      = 0b0001_0000_0000;
+    struct Flags: u8 {
+        const RD_CANCELING = 0b0000_0001;
+        const RD_REISSUE   = 0b0000_0010;
+        const RD_MORE      = 0b0000_0100;
+        const WR_CANCELING = 0b0000_1000;
+        const WR_REISSUE   = 0b0001_0000;
+        const NO_ZC        = 0b0010_0000;
+        const DROPPED_PRI  = 0b0100_0000;
+        const DROPPED_SEC  = 0b1000_0000;
     }
 }
 
@@ -71,9 +70,6 @@ enum Operation {
     },
     Shutdown {
         tx: Option<pool::Sender<io::Result<()>>>,
-    },
-    Close {
-        id: usize,
     },
     Nop,
 }
@@ -108,10 +104,6 @@ impl StreamOps {
                 } else {
                     Flags::NO_ZC
                 };
-                assert!(
-                    api.is_supported(opcode::Close::CODE),
-                    "opcode::Close is required for io-uring support"
-                );
                 assert!(
                     api.is_supported(opcode::Shutdown::CODE),
                     "opcode::Shutdown is required for io-uring support"
@@ -215,10 +207,7 @@ impl Handler for StreamOpsHandler {
                         }
                     }
                 }
-                Operation::Nop
-                | Operation::Poll { .. }
-                | Operation::Close { .. }
-                | Operation::Shutdown { .. } => {}
+                Operation::Nop | Operation::Poll { .. } | Operation::Shutdown { .. } => {}
             });
     }
 
@@ -333,17 +322,6 @@ impl Handler for StreamOpsHandler {
                         let _ = tx.send(res.map(|_| ()));
                     }
                 }
-                Operation::Close { id } => {
-                    if st.streams[id].flags.contains(Flags::DROPPED_SEC) {
-                        let item = st.streams.remove(id);
-                        #[cfg(feature = "trace")]
-                        log::trace!("{}: Close({id})", item.ctx.tag());
-                        mem::forget(item.io);
-                    } else {
-                        st.streams[id].flags.remove(Flags::CLOSING);
-                        st.streams[id].flags.insert(Flags::DROPPED_PRI);
-                    }
-                }
                 Operation::Nop => {}
             }
             let _ = st.ops.remove(user_data);
@@ -356,16 +334,15 @@ impl Handler for StreamOpsHandler {
 
     fn cleanup(&mut self) {
         if let Some(v) = self.inner.storage.take() {
-            for (_, val) in v.streams {
-                if val.flags.intersects(Flags::DROPPED_PRI | Flags::CLOSING) {
-                    mem::forget(val.io);
-                } else {
-                    log::trace!(
-                        "{}: Unclosed sockets {:?}",
-                        val.ctx.tag(),
-                        val.io.peer_addr()
-                    );
-                }
+            for (id, val) in v.streams {
+                log::trace!(
+                    "{}: cleanup stream id={id} fd={:?} flags={:?} peer={:?} local={:?}",
+                    val.ctx.tag(),
+                    val.fd(),
+                    val.flags,
+                    val.io.peer_addr(),
+                    val.io.local_addr()
+                );
             }
         }
         self.inner.delayed_feed.take();
@@ -477,12 +454,19 @@ impl StreamOpsInner {
         // Dropping while `StreamOps` handling event
         if let Some(mut storage) = self.storage.take() {
             let item = &mut storage.streams[id];
-            log::trace!("{}: Close ({:?})", item.tag(), item.fd());
+            log::trace!(
+                "{}: drop primary stream id={id} fd={:?} flags={:?}",
+                item.tag(),
+                item.fd(),
+                item.flags
+            );
 
-            item.flags.insert(Flags::CLOSING);
-            let entry = opcode::Close::new(item.fd()).build();
-            let op_id = storage.add_operation(Operation::Close { id });
-            self.api.submit(op_id, entry);
+            if item.flags.contains(Flags::DROPPED_SEC) {
+                let item = storage.streams.remove(id);
+                crate::helpers::close_socket(item.io);
+            } else {
+                item.flags.insert(Flags::DROPPED_PRI);
+            }
             self.storage.set(Some(storage));
         } else {
             self.add_delayed_drop(IdType::Stream(id as u32));
@@ -493,10 +477,15 @@ impl StreamOpsInner {
         // Dropping while `StreamOps` handling event
         if let Some(mut storage) = self.storage.take() {
             let item = &mut storage.streams[id];
+            log::trace!(
+                "{}: drop weak stream id={id} fd={:?} flags={:?}",
+                item.tag(),
+                item.fd(),
+                item.flags
+            );
             if item.flags.contains(Flags::DROPPED_PRI) {
-                // io is closed already, remove from storage
                 let item = storage.streams.remove(id);
-                mem::forget(item.io);
+                crate::helpers::close_socket(item.io);
             } else {
                 item.flags.insert(Flags::DROPPED_SEC);
             }
