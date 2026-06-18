@@ -328,10 +328,15 @@ impl Accept {
                     "Cannot wait for events in poller: {e}"
                 );
             }
+            let event_summary: Vec<_> = events
+                .iter()
+                .map(|ev| (ev.key, ev.readable, ev.writable))
+                .collect();
             log::trace!(
-                "Accept loop {:?} woke from poller wait with {} events",
+                "Accept loop {:?} woke from poller wait with {} events: {:?}",
                 self.name,
-                events.iter().count()
+                event_summary.len(),
+                event_summary
             );
 
             for idx in 0..self.sockets.len() {
@@ -537,10 +542,16 @@ impl Accept {
     }
 
     fn accept(&mut self, token: usize) -> bool {
+        let mut connection_errors = 0usize;
         loop {
             if let Some(info) = self.sockets.get_mut(token) {
                 match info.sock.accept() {
                     Ok(Some(io)) => {
+                        log::trace!(
+                            "Accept loop {:?} accepted connection on {}",
+                            self.name,
+                            info.addr
+                        );
                         let msg = Connection {
                             io,
                             token: info.token,
@@ -552,9 +563,33 @@ impl Accept {
                             return false;
                         }
                     }
-                    Ok(None) => return true,
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return true,
-                    Err(ref e) if connection_error(e) => (),
+                    Ok(None) => {
+                        log::trace!(
+                            "Accept loop {:?} accept returned None for {}",
+                            self.name,
+                            info.addr
+                        );
+                        return true;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        log::trace!(
+                            "Accept loop {:?} accept would block on {}",
+                            self.name,
+                            info.addr
+                        );
+                        return true;
+                    }
+                    Err(ref e) if connection_error(e) => {
+                        connection_errors += 1;
+                        if connection_errors <= 8 || connection_errors.is_power_of_two() {
+                            log::warn!(
+                                "Accept loop {:?} ignoring connection accept error #{} on {}: {e}",
+                                self.name,
+                                connection_errors,
+                                info.addr
+                            );
+                        }
+                    }
                     Err(e) => {
                         log::error!("Error accepting socket: {e}");
 
