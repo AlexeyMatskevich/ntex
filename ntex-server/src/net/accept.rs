@@ -328,10 +328,7 @@ impl Accept {
                     "Cannot wait for events in poller: {e}"
                 );
             }
-            let event_summary: Vec<_> = events
-                .iter()
-                .map(|ev| (ev.key, ev.readable, ev.writable))
-                .collect();
+            let event_summary: Vec<_> = events.iter().collect();
             log::trace!(
                 "Accept loop {:?} woke from poller wait with {} events: {:?}",
                 self.name,
@@ -339,12 +336,31 @@ impl Accept {
                 event_summary
             );
 
-            for idx in 0..self.sockets.len() {
-                if self.sockets[idx].registered.get() {
+            for event in event_summary {
+                let idx = event.key;
+                if let Some(info) = self.sockets.get(idx) {
+                    if event.is_err().unwrap_or(false) || event.is_interrupt() {
+                        log::warn!(
+                            "Accept loop {:?} received socket poll error event on {}: {:?}",
+                            self.name,
+                            info.addr,
+                            event
+                        );
+                    }
+                    if !info.registered.get() {
+                        continue;
+                    }
                     let readd = self.accept(idx);
                     if readd {
                         self.add_source(idx);
                     }
+                } else {
+                    log::warn!(
+                        "Accept loop {:?} received event for unknown socket key {}: {:?}",
+                        self.name,
+                        idx,
+                        event
+                    );
                 }
             }
 
@@ -620,5 +636,4 @@ fn connection_error(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::ConnectionRefused
         || e.kind() == io::ErrorKind::ConnectionAborted
         || e.kind() == io::ErrorKind::ConnectionReset
-        || e.kind() == io::ErrorKind::InvalidInput
 }
