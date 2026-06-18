@@ -1,4 +1,4 @@
-use std::{cell::Cell, io, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
+use std::{cell::Cell, io, mem, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
 
 use ntex_bytes::{BufMut, BytePage, BytePages, BytesMut};
 use ntex_io::{IoContext, IoTaskStatus};
@@ -336,13 +336,16 @@ impl Handler for StreamOpsHandler {
         if let Some(v) = self.inner.storage.take() {
             for (id, val) in v.streams {
                 log::trace!(
-                    "{}: cleanup stream id={id} fd={:?} flags={:?} peer={:?} local={:?}",
+                    "{}: cleanup stream id={id} fd={:?} flags={:?} rd_op={:?} wr_op={:?} peer={:?} local={:?}",
                     val.ctx.tag(),
                     val.fd(),
                     val.flags,
+                    val.rd_op,
+                    val.wr_op,
                     val.io.peer_addr(),
                     val.io.local_addr()
                 );
+                mem::forget(val.io);
             }
         }
         self.inner.delayed_feed.take();
