@@ -341,10 +341,11 @@ impl Accept {
                 if let Some(info) = self.sockets.get(idx) {
                     if event.is_err().unwrap_or(false) || event.is_interrupt() {
                         log::warn!(
-                            "Accept loop {:?} received socket poll error event on {}: {:?}",
+                            "Accept loop {:?} received socket poll error event on {}: {:?}; state: {}",
                             self.name,
                             info.addr,
-                            event
+                            event,
+                            info.sock.debug_state()
                         );
                     }
                     if !info.registered.get() {
@@ -607,7 +608,10 @@ impl Accept {
                         }
                     }
                     Err(e) => {
-                        log::error!("Error accepting socket: {e}");
+                        log::error!(
+                            "Error accepting socket: {e}; state: {}",
+                            info.sock.debug_state()
+                        );
 
                         // sleep after error
                         info.timeout.set(Some(Instant::now() + ERR_TIMEOUT));
