@@ -393,6 +393,13 @@ impl Accept {
         let info = &self.sockets[idx];
 
         loop {
+            log::trace!(
+                "Accept loop {:?} registering socket listener on {}; registered={} state: {}",
+                self.name,
+                info.addr,
+                info.registered.get(),
+                info.sock.debug_state()
+            );
             // try to register poller source
             let result = if info.registered.get() {
                 self.poller.modify(&info.sock, Event::readable(idx))
@@ -415,6 +422,12 @@ impl Accept {
                 });
             } else {
                 info.registered.set(true);
+                log::trace!(
+                    "Accept loop {:?} registered socket listener on {}; state: {}",
+                    self.name,
+                    info.addr,
+                    info.sock.debug_state()
+                );
             }
 
             break;

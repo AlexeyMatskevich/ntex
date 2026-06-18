@@ -86,13 +86,27 @@ impl fmt::Debug for SocketAddr {
 
 impl Listener {
     pub(super) fn from_tcp(lst: net::TcpListener) -> Self {
+        #[cfg(unix)]
+        let before = tcp_debug_state(&lst);
         let _ = lst.set_nonblocking(true);
+        #[cfg(unix)]
+        log::trace!(
+            "Listener::from_tcp registered listener; before: {}; after: {}",
+            before,
+            tcp_debug_state(&lst)
+        );
         Listener::Tcp(lst)
     }
 
     #[cfg(unix)]
     pub(super) fn from_uds(lst: std::os::unix::net::UnixListener) -> Self {
+        let before = uds_debug_state(&lst);
         let _ = lst.set_nonblocking(true);
+        log::trace!(
+            "Listener::from_uds registered listener; before: {}; after: {}",
+            before,
+            uds_debug_state(&lst)
+        );
         Listener::Uds(lst)
     }
 
@@ -118,47 +132,10 @@ impl Listener {
 
     #[cfg(unix)]
     pub(crate) fn debug_state(&self) -> String {
-        fn acceptconn(fd: std::os::fd::RawFd) -> io::Result<bool> {
-            let mut val: libc::c_int = 0;
-            let mut len = std::mem::size_of_val(&val) as libc::socklen_t;
-            let res = unsafe {
-                libc::getsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_ACCEPTCONN,
-                    std::ptr::addr_of_mut!(val).cast(),
-                    std::ptr::addr_of_mut!(len),
-                )
-            };
-            if res == 0 {
-                Ok(val != 0)
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        }
-
         match self {
-            Listener::Tcp(lst) => {
-                let sock = socket2::SockRef::from(lst);
-                format!(
-                    "tcp fd={} local_addr={:?} take_error={:?} acceptconn={:?}",
-                    lst.as_raw_fd(),
-                    lst.local_addr(),
-                    sock.take_error(),
-                    acceptconn(lst.as_raw_fd())
-                )
-            }
+            Listener::Tcp(lst) => tcp_debug_state(lst),
             #[cfg(unix)]
-            Listener::Uds(lst) => {
-                let sock = socket2::SockRef::from(lst);
-                format!(
-                    "uds fd={} local_addr={:?} take_error={:?} acceptconn={:?}",
-                    lst.as_raw_fd(),
-                    lst.local_addr(),
-                    sock.take_error(),
-                    acceptconn(lst.as_raw_fd())
-                )
-            }
+            Listener::Uds(lst) => uds_debug_state(lst),
         }
     }
 
@@ -190,6 +167,50 @@ impl Listener {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn acceptconn(fd: std::os::fd::RawFd) -> io::Result<bool> {
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of_val(&val) as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            std::ptr::addr_of_mut!(val).cast(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+    if res == 0 {
+        Ok(val != 0)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn tcp_debug_state(lst: &net::TcpListener) -> String {
+    let sock = socket2::SockRef::from(lst);
+    format!(
+        "tcp fd={} local_addr={:?} take_error={:?} acceptconn={:?}",
+        lst.as_raw_fd(),
+        lst.local_addr(),
+        sock.take_error(),
+        acceptconn(lst.as_raw_fd())
+    )
+}
+
+#[cfg(unix)]
+fn uds_debug_state(lst: &std::os::unix::net::UnixListener) -> String {
+    let sock = socket2::SockRef::from(lst);
+    format!(
+        "uds fd={} local_addr={:?} take_error={:?} acceptconn={:?}",
+        lst.as_raw_fd(),
+        lst.local_addr(),
+        sock.take_error(),
+        acceptconn(lst.as_raw_fd())
+    )
 }
 
 #[cfg(unix)]
