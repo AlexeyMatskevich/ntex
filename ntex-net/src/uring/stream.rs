@@ -30,15 +30,16 @@ enum IdType {
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-    struct Flags: u8 {
-        const RD_CANCELING = 0b0000_0001;
-        const RD_REISSUE   = 0b0000_0010;
-        const RD_MORE      = 0b0000_0100;
-        const WR_CANCELING = 0b0000_1000;
-        const WR_REISSUE   = 0b0001_0000;
-        const NO_ZC        = 0b0010_0000;
-        const DROPPED_PRI  = 0b0100_0000;
-        const DROPPED_SEC  = 0b1000_0000;
+    struct Flags: u16 {
+        const RD_CANCELING = 0b0000_0000_0001;
+        const RD_REISSUE   = 0b0000_0000_0010;
+        const RD_MORE      = 0b0000_0000_0100;
+        const WR_CANCELING = 0b0000_0000_1000;
+        const WR_REISSUE   = 0b0000_0001_0000;
+        const NO_ZC        = 0b0000_0010_0000;
+        const DROPPED_PRI  = 0b0000_0100_0000;
+        const DROPPED_SEC  = 0b0000_1000_0000;
+        const CLOSING      = 0b0001_0000_0000;
     }
 }
 
@@ -339,6 +340,7 @@ impl Handler for StreamOpsHandler {
                         log::trace!("{}: Close({id})", item.ctx.tag());
                         mem::forget(item.io);
                     } else {
+                        st.streams[id].flags.remove(Flags::CLOSING);
                         st.streams[id].flags.insert(Flags::DROPPED_PRI);
                     }
                 }
@@ -355,7 +357,7 @@ impl Handler for StreamOpsHandler {
     fn cleanup(&mut self) {
         if let Some(v) = self.inner.storage.take() {
             for (_, val) in v.streams {
-                if val.flags.contains(Flags::DROPPED_PRI) {
+                if val.flags.intersects(Flags::DROPPED_PRI | Flags::CLOSING) {
                     mem::forget(val.io);
                 } else {
                     log::trace!(
@@ -477,6 +479,7 @@ impl StreamOpsInner {
             let item = &mut storage.streams[id];
             log::trace!("{}: Close ({:?})", item.tag(), item.fd());
 
+            item.flags.insert(Flags::CLOSING);
             let entry = opcode::Close::new(item.fd()).build();
             let op_id = storage.add_operation(Operation::Close { id });
             self.api.submit(op_id, entry);
