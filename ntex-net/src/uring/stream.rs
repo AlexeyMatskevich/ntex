@@ -1,4 +1,4 @@
-use std::{cell::Cell, io, mem, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
+use std::{cell::Cell, io, num::NonZeroU32, os::fd::AsRawFd, rc::Rc};
 
 use ntex_bytes::{BufMut, BytePage, BytePages, BytesMut};
 use ntex_io::{IoContext, IoTaskStatus};
@@ -70,6 +70,8 @@ enum Operation {
     },
     Shutdown {
         tx: Option<pool::Sender<io::Result<()>>>,
+        fd: Fd,
+        tag: &'static str,
     },
     Nop,
 }
@@ -167,8 +169,22 @@ impl StreamOps {
 }
 
 impl Operation {
-    fn shutdown(tx: pool::Sender<io::Result<()>>) -> Self {
-        Operation::Shutdown { tx: Some(tx) }
+    fn shutdown(tx: pool::Sender<io::Result<()>>, fd: Fd, tag: &'static str) -> Self {
+        Operation::Shutdown {
+            tx: Some(tx),
+            fd,
+            tag,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Operation::Recv { .. } => "recv",
+            Operation::Send { .. } => "send",
+            Operation::Poll { .. } => "poll",
+            Operation::Shutdown { .. } => "shutdown",
+            Operation::Nop => "nop",
+        }
     }
 }
 
@@ -317,7 +333,8 @@ impl Handler for StreamOpsHandler {
                             item.ctx.stop(res.err());
                         }
                 }
-                Operation::Shutdown { tx } => {
+                Operation::Shutdown { tx, fd, tag } => {
+                    log::trace!("{tag}: Shutdown complete fd={fd:?} result={res:?}");
                     if let Some(tx) = tx {
                         let _ = tx.send(res.map(|_| ()));
                     }
@@ -334,7 +351,18 @@ impl Handler for StreamOpsHandler {
 
     fn cleanup(&mut self) {
         if let Some(v) = self.inner.storage.take() {
-            for (id, val) in v.streams {
+            let StreamOpsStorage { ops, streams } = *v;
+            for (op_id, op) in ops.iter() {
+                if let Some(op) = op.as_ref()
+                    && !matches!(op, Operation::Nop)
+                {
+                    log::trace!(
+                        "cleanup pending uring op id={op_id} kind={} op={op:?}",
+                        op.kind()
+                    );
+                }
+            }
+            for (id, val) in streams {
                 log::trace!(
                     "{}: cleanup stream id={id} fd={:?} flags={:?} rd_op={:?} wr_op={:?} peer={:?} local={:?}",
                     val.ctx.tag(),
@@ -345,7 +373,6 @@ impl Handler for StreamOpsHandler {
                     val.io.peer_addr(),
                     val.io.local_addr()
                 );
-                mem::forget(val.io);
             }
         }
         self.inner.delayed_feed.take();
@@ -544,8 +571,10 @@ impl StreamCtl {
                     self.id
                 );
                 let fd = storage.streams[self.id].fd();
+                let tag = storage.streams[self.id].ctx.tag();
+                log::trace!("{tag}: Submit shutdown id={} fd={fd:?}", self.id);
                 let (tx, rx) = self.inner.pool.channel();
-                let op_id = storage.add_operation(Operation::shutdown(tx));
+                let op_id = storage.add_operation(Operation::shutdown(tx, fd, tag));
                 self.inner
                     .api
                     .submit(op_id, opcode::Shutdown::new(fd, libc::SHUT_RDWR).build());
