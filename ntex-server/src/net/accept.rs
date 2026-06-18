@@ -1,6 +1,8 @@
 #![allow(clippy::missing_panics_doc)]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
-use std::{cell::Cell, fmt, io, sync::Arc, sync::mpsc, thread};
+use std::{cell::Cell, fmt, io, thread};
 use std::{collections::VecDeque, num::NonZeroUsize};
 
 use ntex_polling::{Event, Events, Poller};
@@ -23,6 +25,18 @@ pub enum AcceptorCommand {
     Timer,
 }
 
+impl AcceptorCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            AcceptorCommand::Stop(_) => "Stop",
+            AcceptorCommand::Terminate => "Terminate",
+            AcceptorCommand::Pause => "Pause",
+            AcceptorCommand::Resume => "Resume",
+            AcceptorCommand::Timer => "Timer",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ServerSocketInfo {
     addr: SocketAddr,
@@ -33,16 +47,62 @@ struct ServerSocketInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct AcceptNotify(Arc<Poller>, mpsc::Sender<AcceptorCommand>);
+pub struct AcceptNotify {
+    poller: Arc<Poller>,
+    tx: mpsc::Sender<AcceptorCommand>,
+    name: Arc<Mutex<String>>,
+    seq: Arc<AtomicU64>,
+}
 
 impl AcceptNotify {
-    fn new(waker: Arc<Poller>, tx: mpsc::Sender<AcceptorCommand>) -> Self {
-        AcceptNotify(waker, tx)
+    fn new(poller: Arc<Poller>, tx: mpsc::Sender<AcceptorCommand>, name: String) -> Self {
+        AcceptNotify {
+            poller,
+            tx,
+            name: Arc::new(Mutex::new(name)),
+            seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn set_name(&self, name: String) {
+        *self.name.lock().unwrap_or_else(|err| err.into_inner()) = name;
+    }
+
+    fn name(&self) -> String {
+        self.name
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub fn send(&self, cmd: AcceptorCommand) {
-        let _ = self.1.send(cmd);
-        let _ = self.0.notify();
+        let label = cmd.label();
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let name = self.name();
+
+        log::trace!("AcceptNotify {name:?} sending {label} seq={seq}");
+        match self.tx.send(cmd) {
+            Ok(()) => {
+                log::trace!("AcceptNotify {name:?} queued {label} seq={seq}");
+            }
+            Err(err) => {
+                log::error!(
+                    "AcceptNotify {name:?} failed to queue {label} seq={seq}: {err:?}"
+                );
+                return;
+            }
+        }
+
+        match self.poller.notify() {
+            Ok(()) => {
+                log::trace!("AcceptNotify {name:?} notified poller for {label} seq={seq}");
+            }
+            Err(err) => {
+                log::error!(
+                    "AcceptNotify {name:?} failed to notify poller for {label} seq={seq}: {err}"
+                );
+            }
+        }
     }
 }
 
@@ -72,11 +132,12 @@ impl AcceptLoop {
         );
 
         let (tx, rx) = mpsc::channel();
-        let notify = AcceptNotify::new(poll.clone(), tx);
+        let name = "ntex:accept".to_string();
+        let notify = AcceptNotify::new(poll.clone(), tx, name.clone());
 
         AcceptLoop {
             notify,
-            name: "ntex:accept".to_string(),
+            name,
             inner: Some((rx, poll)),
             testing: false,
             status_handler: None,
@@ -88,6 +149,7 @@ impl AcceptLoop {
     /// Name is used for worker thread name
     pub fn name<T: AsRef<str>>(&mut self, name: T) {
         self.name = format!("{}:accept", name.as_ref());
+        self.notify.set_name(self.name.clone());
     }
 
     /// Get notification api for the loop
@@ -255,12 +317,22 @@ impl Accept {
 
             events.clear();
 
+            log::trace!(
+                "Accept loop {:?} waiting on poller, backpressure={}",
+                self.name,
+                self.backpressure
+            );
             if let Err(e) = self.poller.wait(&mut events, None) {
                 assert!(
                     e.kind() == io::ErrorKind::Interrupted,
                     "Cannot wait for events in poller: {e}"
                 );
             }
+            log::trace!(
+                "Accept loop {:?} woke from poller wait with {} events",
+                self.name,
+                events.iter().count()
+            );
 
             for idx in 0..self.sockets.len() {
                 if self.sockets[idx].registered.get() {
