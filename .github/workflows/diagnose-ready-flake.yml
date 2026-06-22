@@ -3,7 +3,7 @@ name: Diagnose server ready flake
 on:
   push:
     branches:
-      - codex/main-ntex-net-3.13-repro
+      - codex/main-cleanup-repro
   workflow_dispatch:
     inputs:
       client_iterations:
