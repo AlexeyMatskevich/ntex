@@ -3,7 +3,7 @@ name: Diagnose server ready flake
 on:
   push:
     branches:
-      - codex/main-cleanup-process-cmd-probe
+      - codex/main-cleanup-ready-wake-probe
   workflow_dispatch:
     inputs:
       client_iterations:
